@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout build config
@@ -20,47 +20,79 @@ jobs:
           sudo apt-get install -y -qq \
             build-essential bc bison flex libssl-dev libelf-dev \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            zip zstd
+            zip zstd cpio
 
       - name: Fetch kernel source
         run: |
           git clone --depth 1 https://github.com/lualua99/Realking_kernel_sm8250.git kernel
           cd kernel
           git config core.protectNTFS false
-          echo "kernel version:" && head -5 Makefile
+          echo "--- source version ---"
+          head -5 Makefile
 
-      - name: Show what we changed
+      - name: Show config deltas
         run: |
-          echo "=== critical config diff ==="
-          grep -E 'MODULE_SIG_FORCE|^CONFIG_KPROBES' device.config || true
+          echo "=== what we changed vs stock ==="
+          grep -E 'MODULE_SIG_FORCE|^CONFIG_KPROBES|BUILD_ARM64_KERNEL_COMPRESSION|BUILD_ARM64_UNCOMPRESSED' device.config || true
 
       - name: Configure
         run: |
+          set -euxo pipefail
           cd kernel
           mkdir -p out
           cp ../device.config out/.config
-          make ARCH=arm64 O=out olddefconfig 2>&1 | tail -5
-          echo "=== resulting critical options ==="
-          grep -E 'MODULE_SIG_FORCE|^CONFIG_KPROBES' out/.config || true
+          make ARCH=arm64 O=out olddefconfig
+          echo "=== effective critical options ==="
+          grep -E 'MODULE_SIG_FORCE|^CONFIG_KPROBES=' out/.config || true
+          echo "=== image target ==="
+          grep -E 'BUILD_ARM64_KERNEL_COMPRESSION_GZIP|BUILD_ARM64_UNCOMPRESSED_KERNEL' out/.config || true
 
-      - name: Build kernel
+      - name: Build Image
+        run: |
+          set -o pipefail
+          cd kernel
+          make ARCH=arm64 O=out -j"$(nproc)" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            Image 2>&1 | tee /tmp/build.log
+          echo "=== make exit: $? ==="
+
+      - name: Build dtbs
+        continue-on-error: true
         run: |
           cd kernel
           make ARCH=arm64 O=out -j"$(nproc)" \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            Image.gz dtbs 2>&1 | tail -40
+            dtbs 2>&1 | tail -30 || echo "dtbs failed (non-fatal)"
+
+      - name: Diagnose output tree
+        if: always()
+        run: |
+          echo "=== out/arch/arm64/boot/ ==="
+          ls -la kernel/out/arch/arm64/boot/ 2>&1 || echo "boot dir missing"
+          echo
+          echo "=== any Image anywhere ==="
+          find kernel/out -name 'Image' -o -name 'Image.gz' 2>/dev/null | head -20
+          echo
+          echo "=== dtb count ==="
+          find kernel/out -name '*.dtb' 2>/dev/null | wc -l
+          echo
+          echo "=== last 60 lines of build log ==="
+          tail -60 /tmp/build.log 2>&1 || echo "no build log"
 
       - name: Collect artifacts
         run: |
+          set -euxo pipefail
           mkdir -p artifact
-          for f in Image.gz Image; do
-            if [ -f "kernel/out/arch/arm64/boot/$f" ]; then
-              cp "kernel/out/arch/arm64/boot/$f" artifact/
-              echo "got $f"
-            fi
-          done
-          find kernel/out/arch/arm64/boot/dts/qcom -name '*.dtb' -exec cp {} artifact/ \; 2>/dev/null || true
-          echo "=== artifact ==="
+          IMG=$(find kernel/out -name 'Image' -type f | head -1)
+          if [ -z "$IMG" ]; then
+            echo "FATAL: no Image produced"
+            find kernel/out -maxdepth 4 -type d | head -30
+            exit 1
+          fi
+          cp -v "$IMG" artifact/Image
+          # dtbs are optional
+          find kernel/out/arch/arm64/boot/dts -name 'kona*.dtb' -exec cp -v {} artifact/ \; 2>/dev/null || true
+          echo "=== artifact contents ==="
           ls -lh artifact/
 
       - name: Upload artifact
@@ -69,3 +101,4 @@ jobs:
           name: kona-kernel
           path: artifact/
           retention-days: 14
+          if-no-files-found: error
