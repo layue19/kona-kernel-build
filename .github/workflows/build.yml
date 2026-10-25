@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Checkout build config
@@ -63,45 +63,49 @@ jobs:
           echo "=== image target ==="
           grep -E 'BUILD_ARM64_KERNEL_COMPRESSION_GZIP|BUILD_ARM64_UNCOMPRESSED_KERNEL' out/.config || true
 
-      - name: Expand swap and set low-jobs
+      - name: Check build environment
         run: |
           set -euxo pipefail
-          echo "=== memory before ==="
+          echo "=== cpu ==="
+          nproc
+          echo "=== memory ==="
           free -h
-          echo "=== swap before ==="
-          swapon --show || echo "(none)"
-          # GitHub runner 只有 7 GB RAM，4.19 内核 -j4 会 OOM
-          sudo fallocate -l 8G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=8192
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          echo "=== memory after ==="
-          free -h
-          swapon --show
+          echo "=== disk ==="
+          df -h / /mnt || true
+          echo "=== pre-existing oom events ==="
+          (dmesg 2>/dev/null || sudo dmesg 2>/dev/null || echo "") | grep -c 'Out of memory' || echo 0
 
       - name: Build Image
         run: |
           set -o pipefail
           cd kernel
-          echo "=== jobs: 2 (memory safety) ==="
-          make ARCH=arm64 O=out -j2 \
+          echo "=== jobs: 1 (2-core / 7GB runner: -j2 was OOM-killed) ==="
+          make ARCH=arm64 O=out -j1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             Image 2>&1 | tee /tmp/build.log
           echo "=== make exit: $? ==="
-          echo "=== memory peak ==="
+          echo "=== memory after build ==="
           free -h
+          echo "=== oom events during build ==="
+          (dmesg 2>/dev/null || sudo dmesg 2>/dev/null || echo "") | grep -c 'Out of memory' || echo 0
 
       - name: Build dtbs
         continue-on-error: true
         run: |
           cd kernel
-          make ARCH=arm64 O=out -j2 \
+          make ARCH=arm64 O=out -j1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             dtbs 2>&1 | tail -30 || echo "dtbs failed (non-fatal)"
 
       - name: Diagnose output tree
         if: always()
         run: |
+          echo "=== oom events (definitive) ==="
+          (dmesg 2>/dev/null || sudo dmesg 2>/dev/null || echo "") | grep -i 'out of memory\|oom-kill\|killed process' | tail -10 || echo "no oom records"
+          echo
+          echo "=== memory now ==="
+          free -h
+          echo
           echo "=== out/arch/arm64/boot/ ==="
           ls -la kernel/out/arch/arm64/boot/ 2>&1 || echo "boot dir missing"
           echo
@@ -110,6 +114,9 @@ jobs:
           echo
           echo "=== dtb count ==="
           find kernel/out -name '*.dtb' 2>/dev/null | wc -l
+          echo
+          echo "=== object file count (progress indicator) ==="
+          find kernel/out -name '*.o' 2>/dev/null | wc -l
           echo
           echo "=== last 60 lines of build log ==="
           tail -60 /tmp/build.log 2>&1 || echo "no build log"
