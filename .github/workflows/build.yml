@@ -63,20 +63,39 @@ jobs:
           echo "=== image target ==="
           grep -E 'BUILD_ARM64_KERNEL_COMPRESSION_GZIP|BUILD_ARM64_UNCOMPRESSED_KERNEL' out/.config || true
 
+      - name: Expand swap and set low-jobs
+        run: |
+          set -euxo pipefail
+          echo "=== memory before ==="
+          free -h
+          echo "=== swap before ==="
+          swapon --show || echo "(none)"
+          # GitHub runner 只有 7 GB RAM，4.19 内核 -j4 会 OOM
+          sudo fallocate -l 8G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=8192
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          echo "=== memory after ==="
+          free -h
+          swapon --show
+
       - name: Build Image
         run: |
           set -o pipefail
           cd kernel
-          make ARCH=arm64 O=out -j"$(nproc)" \
+          echo "=== jobs: 2 (memory safety) ==="
+          make ARCH=arm64 O=out -j2 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             Image 2>&1 | tee /tmp/build.log
           echo "=== make exit: $? ==="
+          echo "=== memory peak ==="
+          free -h
 
       - name: Build dtbs
         continue-on-error: true
         run: |
           cd kernel
-          make ARCH=arm64 O=out -j"$(nproc)" \
+          make ARCH=arm64 O=out -j2 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             dtbs 2>&1 | tail -30 || echo "dtbs failed (non-fatal)"
 
