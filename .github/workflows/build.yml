@@ -30,6 +30,22 @@ jobs:
           echo "--- source version ---"
           head -5 Makefile
 
+      - name: Patch broken CC override
+        run: |
+          set -euxo pipefail
+          cd kernel
+          echo "=== BEFORE ==="
+          grep -n 'gcc-wrapper' Makefile || echo "(none found)"
+          grep -n '^PYTHON' Makefile || true
+          # fork 作者残留：CC = $(PYTHON2) $(srctree)/scripts/gcc-wrapper.py $(REAL_CC)
+          # python2 在 ubuntu-22.04 不存在 / gcc-wrapper.py 未提交 / REAL_CC 未定义
+          # 这一行无条件覆盖了 384-404 行正确定义的 CC，必须删掉
+          sed -i '/gcc-wrapper\.py/d' Makefile
+          echo "=== AFTER ==="
+          grep -n 'gcc-wrapper' Makefile || echo "removed OK"
+          echo "--- effective CC definitions ---"
+          grep -n '^CC' Makefile || true
+
       - name: Show config deltas
         run: |
           echo "=== what we changed vs stock ==="
